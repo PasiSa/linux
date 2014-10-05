@@ -3598,6 +3598,7 @@ void tcp_parse_options(const struct sk_buff *skb,
 					TCP_SKB_CB(skb)->sacked = (ptr - 2) - (unsigned char *)th;
 				}
 				break;
+
 #ifdef CONFIG_TCP_MD5SIG
 			case TCPOPT_MD5SIG:
 				/*
@@ -3607,6 +3608,27 @@ void tcp_parse_options(const struct sk_buff *skb,
 				break;
 #endif
 			case TCPOPT_EXP:
+				if (get_unaligned_be16(ptr) == TCPOPT_EDO_REQ_MAGIC) {
+					if (opsize == TCPOLEN_EDO_REQUEST && th->syn &&
+					    !estab && sysctl_tcp_edo) {
+						opt_rx->edo_ok = 1;
+					}
+					break;
+				}
+				if (get_unaligned_be16(ptr) == TCPOPT_EDO_LEN_MAGIC) {
+					if (opsize == TCPOLEN_EDO_LENGTH &&
+					    sysctl_tcp_edo) {
+						opt_rx->edo_ok = 1;
+						TCP_SKB_CB(skb)->doff = get_unaligned_be16(ptr + 2);
+						if (TCP_SKB_CB(skb)->doff > th->doff * 4) {
+							length += TCP_SKB_CB(skb)->doff - (th->doff * 4);
+							/* Temp. hack: end_seq is sometimes set differently in SYN_RCVD state. Have yet to locate where this happens */
+							if (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq)
+								TCP_SKB_CB(skb)->end_seq -= TCP_SKB_CB(skb)->doff - (th->doff * 4);
+						}
+					}
+				}
+
 				/* Fast Open option shares code 254 using a
 				 * 16 bits magic number. It's valid only in
 				 * SYN or SYN-ACK with an even size.
@@ -4357,7 +4379,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 		goto drop;
 
 	skb_dst_drop(skb);
-	__skb_pull(skb, th->doff * 4);
+	__skb_pull(skb, TCP_SKB_CB(skb)->doff);
 
 	TCP_ECN_accept_cwr(tp, skb);
 
@@ -5026,6 +5048,9 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 		 * bit is set, if so drop the segment and return)".
 		 */
 		if (!th->rst) {
+			SOCK_DEBUG(sk, "PS: invalid sequence: %x-%x, state: %d\n",
+				    TCP_SKB_CB(skb)->seq,
+				   TCP_SKB_CB(skb)->end_seq, sk->sk_state);
 			if (th->syn)
 				goto syn_challenge;
 			tcp_send_dupack(sk, skb);
@@ -5115,6 +5140,8 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 	 */
 
 	tp->rx_opt.saw_tstamp = 0;
+
+	TCP_SKB_CB(skb)->doff = th->doff * 4;
 
 	/*	pred_flags is 0xS?10 << 16 + snd_wnd
 	 *	if header_prediction is to be made
@@ -5630,6 +5657,8 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 
 	tp->rx_opt.saw_tstamp = 0;
 
+	TCP_SKB_CB(skb)->doff = th->doff * 4;
+
 	switch (sk->sk_state) {
 	case TCP_CLOSE:
 		goto discard;
@@ -5692,6 +5721,10 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 
 	if (!th->ack && !th->rst)
 		goto discard;
+
+	SOCK_DEBUG(sk, "PS: checkpoint, state %d. start_seq %x  end_seq %x\n",
+		   sk->sk_state, TCP_SKB_CB(skb)->seq,
+		   TCP_SKB_CB(skb)->end_seq);
 
 	if (!tcp_validate_incoming(sk, skb, th, 0))
 		return 0;

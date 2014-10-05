@@ -91,6 +91,7 @@ struct tcp_options_received {
 		snd_wscale : 4,	/* Window scaling received from sender	*/
 		rcv_wscale : 4;	/* Window scaling to send to receiver	*/
 	u8	num_sacks;	/* Number of SACK blocks		*/
+	u8      edo_ok;         /* have seen EDO request and accepted it */
 	u16	user_mss;	/* mss requested by user in ioctl	*/
 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
 };
@@ -105,7 +106,8 @@ static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
  * to increase this, although since:
  *   size = TCPOLEN_SACK_BASE_ALIGNED (4) + n * TCPOLEN_SACK_PERBLOCK (8)
  * only four options will fit in a standard TCP header */
-#define TCP_NUM_SACKS 4
+// With EDO, will experiment increasing this to 8
+#define TCP_NUM_SACKS 8
 
 struct tcp_request_sock_ops;
 

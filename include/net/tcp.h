@@ -179,9 +179,15 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOPT_MD5SIG		19	/* MD5 Signature (RFC2385) */
 #define TCPOPT_EXP		254	/* Experimental */
 /* Magic number to be after the option value for sharing TCP
- * experimental options. See draft-ietf-tcpm-experimental-options-00.txt
+ * experimental options. See RFC 6994.
  */
 #define TCPOPT_FASTOPEN_MAGIC	0xF989
+
+/* New EDO options (draft-ietf-tcpm-tcp-edo-00.txt) */
+/* For the time being using experimental options,
+   IANA allocation fore real option numbers expected */
+#define TCPOPT_EDO_REQ_MAGIC	0x5202
+#define TCPOPT_EDO_LEN_MAGIC	0x5203
 
 /*
  *     TCP option lengths
@@ -194,6 +200,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOLEN_MD5SIG         18
 #define TCPOLEN_EXP_FASTOPEN_BASE  4
 
+#define TCPOLEN_EDO_REQUEST	4
+#define TCPOLEN_EDO_LENGTH	8
+
 /* But this is what stacks really send out. */
 #define TCPOLEN_TSTAMP_ALIGNED		12
 #define TCPOLEN_WSCALE_ALIGNED		4
@@ -203,6 +212,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOLEN_SACK_PERBLOCK		8
 #define TCPOLEN_MD5SIG_ALIGNED		20
 #define TCPOLEN_MSS_ALIGNED		4
+#define TCPOLEN_EDO_REQUEST_ALIGNED	4
+#define TCPOLEN_EDO_LENGTH_ALIGNED	8
 
 /* Flags in tp->nonagle */
 #define TCP_NAGLE_OFF		1	/* Nagle's algo is disabled */
@@ -278,6 +289,7 @@ extern int sysctl_tcp_challenge_ack_limit;
 extern unsigned int sysctl_tcp_notsent_lowat;
 extern int sysctl_tcp_min_tso_segs;
 extern int sysctl_tcp_autocorking;
+extern int sysctl_tcp_edo;
 
 extern atomic_long_t tcp_memory_allocated;
 extern struct percpu_counter tcp_sockets_allocated;
@@ -714,6 +726,8 @@ struct tcp_skb_cb {
 	__u8		ip_dsfield;	/* IPv4 tos or IPv6 dsfield	*/
 	/* 1 byte hole */
 	__u32		ack_seq;	/* Sequence number ACK'd	*/
+
+	__u16		doff;		/* data offset (used with EDO option) */
 };
 
 #define TCP_SKB_CB(__skb)	((struct tcp_skb_cb *)&((__skb)->cb[0]))
@@ -1101,6 +1115,7 @@ static inline void tcp_openreq_init(struct request_sock *req,
 	req->ts_recent = rx_opt->saw_tstamp ? rx_opt->rcv_tsval : 0;
 	ireq->tstamp_ok = rx_opt->tstamp_ok;
 	ireq->sack_ok = rx_opt->sack_ok;
+	ireq->edo_ok = rx_opt->edo_ok;
 	ireq->snd_wscale = rx_opt->snd_wscale;
 	ireq->wscale_ok = rx_opt->wscale_ok;
 	ireq->acked = 0;

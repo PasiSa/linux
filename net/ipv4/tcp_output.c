@@ -36,6 +36,8 @@
 
 #define pr_fmt(fmt) "TCP: " fmt
 
+#define TEST_EDO   // PS: for testing if EDO works, normally undefined
+
 #include <net/tcp.h>
 
 #include <linux/compiler.h>
@@ -64,6 +66,9 @@ int sysctl_tcp_base_mss __read_mostly = TCP_BASE_MSS;
 
 /* By default, RFC2861 behavior.  */
 int sysctl_tcp_slow_start_after_idle __read_mostly = 1;
+
+/* Enabling EDO TCP option */
+int sysctl_tcp_edo __read_mostly = 0;
 
 unsigned int sysctl_tcp_notsent_lowat __read_mostly = UINT_MAX;
 EXPORT_SYMBOL(sysctl_tcp_notsent_lowat);
@@ -403,11 +408,18 @@ static inline bool tcp_urg_mode(const struct tcp_sock *tp)
 #define OPTION_TS		(1 << 1)
 #define OPTION_MD5		(1 << 2)
 #define OPTION_WSCALE		(1 << 3)
+#define OPTION_EDO_REQ		(1 << 4)
+#define OPTION_EDO_LEN		(1 << 5)
+#ifdef TEST_EDO
+#define OPTION_EDO_TEST		(1 << 6)
+#define EDO_TEST_NOPCOUNT	60
+#endif
 #define OPTION_FAST_OPEN_COOKIE	(1 << 8)
 
 struct tcp_out_options {
 	u16 options;		/* bit field of OPTION_* */
 	u16 mss;		/* 0 to disable */
+	u16 hdrlen;		/* length of header, to be used with EDO */
 	u8 ws;			/* window scale, 0 to disable */
 	u8 num_sack_blocks;	/* number of SACK blocks to include */
 	u8 hash_size;		/* bytes in hash_location */
@@ -447,6 +459,30 @@ static void tcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 			       (TCPOLEN_MSS << 16) |
 			       opts->mss);
 	}
+
+	if (OPTION_EDO_REQ & options) {
+		*ptr++ = htonl((TCPOPT_EXP << 24) |
+			       (TCPOLEN_EDO_REQUEST << 16) |
+			       TCPOPT_EDO_REQ_MAGIC);
+	}
+	if (OPTION_EDO_LEN & options) {
+		*ptr++ = htonl((TCPOPT_EXP << 24) |
+			       (TCPOLEN_EDO_LENGTH << 16) |
+			       TCPOPT_EDO_LEN_MAGIC);
+		*ptr++ = htonl(opts->hdrlen << 16);
+	}
+
+#ifdef TEST_EDO
+	if (OPTION_EDO_TEST & options) {
+		int i = EDO_TEST_NOPCOUNT;
+		for (; i > 0; i -= 4) {
+			*ptr++ = (TCPOPT_NOP << 24) |
+				(TCPOPT_NOP << 16) |
+				(TCPOPT_NOP << 8) |
+				TCPOPT_NOP;
+		}
+	}
+#endif
 
 	if (likely(OPTION_TS & options)) {
 		if (unlikely(OPTION_SACK_ADVERTISE & options)) {
@@ -576,6 +612,11 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
+	if (sysctl_tcp_edo) {
+		opts->options |= OPTION_EDO_REQ;
+		remaining -= TCPOLEN_EDO_REQUEST_ALIGNED;
+	}
+
 	return MAX_TCP_OPTION_SPACE - remaining;
 }
 
@@ -627,6 +668,11 @@ static unsigned int tcp_synack_options(struct sock *sk,
 		if (unlikely(!ireq->tstamp_ok))
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
+	if (ireq->edo_ok && sysctl_tcp_edo) {
+		opts->options |= OPTION_EDO_LEN;
+		remaining -= TCPOLEN_EDO_LENGTH_ALIGNED;
+
+	}
 	if (foc != NULL && foc->len >= 0) {
 		u32 need = TCPOLEN_EXP_FASTOPEN_BASE + foc->len;
 		need = (need + 3) & ~3U;  /* Align to 32 bits */
@@ -651,6 +697,7 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int size = 0;
 	unsigned int eff_sacks;
+	int max_space = MAX_TCP_OPTION_SPACE;
 
 	opts->options = 0;
 
@@ -664,6 +711,20 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 	*md5 = NULL;
 #endif
 
+	if (skb && tp->rx_opt.edo_ok)
+		max_space = tcp_current_mss(sk);
+
+#ifdef TEST_EDO
+	if (skb) {
+		// only include test options, if we have enough room for them
+		if (sysctl_tcp_edo == 2 && tp->rx_opt.edo_ok &&
+		    skb->len + EDO_TEST_NOPCOUNT + TCPOLEN_EDO_LENGTH_ALIGNED + sizeof(struct tcphdr) < max_space) {
+			opts->options |= OPTION_EDO_TEST;
+			size += EDO_TEST_NOPCOUNT;
+		}
+	}
+#endif
+
 	if (likely(tp->rx_opt.tstamp_ok)) {
 		opts->options |= OPTION_TS;
 		opts->tsval = tcb ? tcb->when + tp->tsoffset : 0;
@@ -673,13 +734,19 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 
 	eff_sacks = tp->rx_opt.num_sacks + tp->rx_opt.dsack;
 	if (unlikely(eff_sacks)) {
-		const unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+		const unsigned int remaining = max_space - size;
 		opts->num_sack_blocks =
 			min_t(unsigned int, eff_sacks,
 			      (remaining - TCPOLEN_SACK_BASE_ALIGNED) /
 			      TCPOLEN_SACK_PERBLOCK);
 		size += TCPOLEN_SACK_BASE_ALIGNED +
 			opts->num_sack_blocks * TCPOLEN_SACK_PERBLOCK;
+	}
+
+	if (size > MAX_TCP_OPTION_SPACE) {
+		opts->options |= OPTION_EDO_LEN;
+		size += TCPOLEN_EDO_LENGTH_ALIGNED;
+		opts->hdrlen = size + sizeof(struct tcphdr);
 	}
 
 	return size;
@@ -918,6 +985,11 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 	skb->destructor = tcp_wfree;
 	skb_set_hash_from_sk(skb, sk);
 	atomic_add(skb->truesize, &sk->sk_wmem_alloc);
+
+	// if EDO is included, assume it is the first option in header
+	// According to spec, the standard data offset should only include EDO
+	if (opts.options & OPTION_EDO_LEN)
+		tcp_header_size = TCPOLEN_EDO_LENGTH + sizeof(struct tcphdr);
 
 	/* Build TCP header and checksum it. */
 	th = tcp_hdr(skb);
@@ -2841,6 +2913,7 @@ struct sk_buff *tcp_make_synack(struct sock *sk, struct dst_entry *dst,
 	TCP_SKB_CB(skb)->when = tcp_time_stamp;
 	tcp_header_size = tcp_synack_options(sk, req, mss, skb, &opts, &md5,
 					     foc) + sizeof(*th);
+	opts.hdrlen = tcp_header_size;
 
 	skb_push(skb, tcp_header_size);
 	skb_reset_transport_header(skb);

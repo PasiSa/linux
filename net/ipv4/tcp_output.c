@@ -474,7 +474,8 @@ static void tcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 
 #ifdef TEST_EDO
 	if (OPTION_EDO_TEST & options) {
-		int i = EDO_TEST_NOPCOUNT;
+		// if >= 2 sysctl_tcp_edo tells how many NOP options to include
+		int i = sysctl_tcp_edo;
 		for (; i > 0; i -= 4) {
 			*ptr++ = (TCPOPT_NOP << 24) |
 				(TCPOPT_NOP << 16) |
@@ -717,10 +718,10 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 #ifdef TEST_EDO
 	if (skb) {
 		// only include test options, if we have enough room for them
-		if (sysctl_tcp_edo == 2 && tp->rx_opt.edo_ok &&
+		if (sysctl_tcp_edo >= 2 && tp->rx_opt.edo_ok &&
 		    skb->len + EDO_TEST_NOPCOUNT + TCPOLEN_EDO_LENGTH_ALIGNED + sizeof(struct tcphdr) < max_space) {
 			opts->options |= OPTION_EDO_TEST;
-			size += EDO_TEST_NOPCOUNT;
+			size += sysctl_tcp_edo;
 		}
 	}
 #endif
